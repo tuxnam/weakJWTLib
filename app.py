@@ -6,7 +6,9 @@ import jwt
 import json
 import datetime
 import base64
+from auth_utils import jwt_protected
 from jwt.algorithms import RSAAlgorithm
+from errors import *
 
 app = Flask(__name__)
 app.config['SUPPORTED_ALGORITHMS'] = ['HS256', 'HS384', 'HS512', 'ES256', 'ES384', 'ES512', 'RS256', 'RS384',
@@ -15,6 +17,9 @@ app.config['SUPPORTED_AUTHENTICATION'] = ['JWT-SHA2', 'JWT-RSA']
 app.config['SYMMETRIC_KEY'] = 'mySuperSeretKeyHostedSoSecurely!1234'
 app.config['JWT_PUBLIC_KEY'] = open('keys/rsa.public').read()
 app.config['JWT_PRIVATE_KEY'] = open('keys/rsa.private').read()
+
+def dict_from_row(row):
+    return dict(zip(row.keys(), row)) 
 
 @app.route('/register', methods=['POST'])
 def register():
@@ -55,6 +60,7 @@ def register():
             return json.dumps({'Error':msg}), 400, {'ContentType':'application/json'}  
         else:
             return json.dumps({'Message':msg}), 200, {'ContentType':'application/json'}
+
 
 @app.route('/list', methods=['GET'])
 def list():
@@ -137,39 +143,80 @@ def authForTrustedClients():
        return encodedJWT, 200, {'ContentType':'application/json'}
 
 
-@app.route('/protectedResourceSYM', methods=['POST'])
-def protectedResource():
-    authHeader = request.headers['Authorization']
-    if (authHeader is not None) or (authHeader.startswith('JWT')):
-        encodedJWT = authHeader.split('JWT ')
-    else:
-        raise Exception(
-            'JWT in Authorization header mal-formatted or missing!', status_code=403)
+##User update based on UID
+@app.route('/user/<int:uid>', methods=['PUT'])
+##@jwt_protected
+def updateUserByUID(uid):
 
-    app.config['JWT_KEY'] = app.config['SYMMETRIC_KEY']
-    app.config['JWT_KEY'] = app.config['JWT_PUBLIC_KEY']
+    try:
+        username = request.json.get('username')
+        authmethod = request.json.get('authMethod')
 
-    decoded = jwt.decode(
-            encodedJWT[1], app.config['JWT_KEY'], algorithms=app.config['SUPPORTED_ALGORITHMS'])
+        con = sql.connect("database.db")
+        data = []
+        con.row_factory = sql.Row
+        cur = con.cursor()
+        cur.execute("SELECT * FROM Users WHERE ID=(?)",(str(uid),))
+        rows = cur.fetchall()
 
-    return decoded, 200, {'ContentType':'application/json'}
+        dict = []
+        for row in rows:
+            dict.append(dict_from_row(row))
+    
+        if len(dict) < 1:
+            raise RecordsNotFoundError('No user with this UID was found!')  
+    
+        if len(dict) > 1:
+            raise MutipleRecordsError('The user table seems to be corrupted, several users found for the same ID!') 
 
-@app.route('/protectedResourcePKI', methods=['POST'])
-def protectedResourcePKI():
-    authHeader = request.headers['Authorization']
-    if (authHeader is None) or (authHeader.startswith('JWT')):
-        encodedJWT = authHeader.split('JWT ')
-    else:
-        raise Exception(
-            'JWT in Authorization header mal-formatted or missing!', status_code=403)
+        #rowcount is == 1
+        #checking current values for this user
+        if (dict[0]['USERNAME'] == username) or (username is None):
+            username = dict[0]['USERNAME']
+    
+        if (dict[0]['AUTHMETHOD'] == authmethod) or (authmethod is None):
+            authmethod = dict[0]['AUTHMETHOD']
 
-    app.config['JWT_KEY'] = app.config['SYMMETRIC_KEY']
-    app.config['JWT_KEY'] = app.config['JWT_PUBLIC_KEY']
+        cur.execute("UPDATE Users SET USERNAME=(?), AUTHMETHOD=(?) WHERE ID=(?)",(username, authmethod, str(uid),))
+        con.commit()
+        
+        return {'Message':'User successfuly updated, number of rows updated: '+str(cur.rowcount)}, 200, {'ContentType':'application/json'}
 
-    decoded = jwt.decode(
-            encodedJWT[1], app.config['JWT_KEY'], algorithms=app.config['SUPPORTED_ALGORITHMS'])
+    except sql.Error as sql_error:
+        raise DatabaseQueryError(sql_error)
+    except:
+        raise InternalServerError(sys.exc_info()[0])
+    finally:
+        if con:
+            con.close()
 
-    return decoded, 200, {'ContentType':'application/json'}
+    
+##List users based on UID
+@app.route('/user/<int:uid>', methods=['GET'])
+@jwt_protected
+def listUsers(uid):
+    
+    data = []
+    try:
+        con = sql.connect("database.db")
+        con.row_factory = sql.Row
+        cur = con.cursor()
+        cur.execute("SELECT * FROM Users WHERE ID=(?)",(str(uid),))
+        rows = cur.fetchall()
+    
+        for row in rows:
+            data.append([x for x in row])
+
+        return json.dumps(data), 200, {'ContentType':'application/json'}
+
+    except sql.Error as sql_error:
+        raise DatabaseQueryError(sql_error) 
+    except Exception as exception:
+        raise InternalServerError(exception)
+    finally:
+        if con:
+            con.close()
+    
 
 if __name__ == '__main__':
     app.run()
