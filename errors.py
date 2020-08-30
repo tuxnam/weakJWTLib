@@ -6,6 +6,26 @@ logging.basicConfig(filename='errors.log')
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
 
+class WeakPasswordError(Exception):
+    """Exception raised for errors in password complexity.
+
+    Attributes:
+        message -- explanation of the error
+    """
+    def __init__(self, message):
+        logging.warning(str(datetime.now().time())+': '+str(message))
+        abort(make_response(jsonify(error=['The password defined does not match required complexity settings.']), 400))
+
+class UnknownRoleError(Exception):
+    """Exception raised for errors in role assignment.
+
+    Attributes:
+        message -- explanation of the error
+    """
+    def __init__(self, message):
+        logging.warning(str(datetime.now().time())+': '+str(message))
+        abort(make_response(jsonify(error=['An error occured with your request, the role mentioned is not supported.']), 400))
+
 class DatabaseQueryError(Exception):
     """Exception raised for errors against the database.
 
@@ -35,6 +55,8 @@ class RecordsNotFoundError(Exception):
     def __init__(self, message):
         logging.error(str(datetime.now().time())+': '+str(message))
         abort(make_response(jsonify(error=['']), 204))
+
+
 
 class MultipleRecordsError(Exception):
     """Exception raised for query returning multiple records while 1 is excepted.
