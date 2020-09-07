@@ -1,43 +1,30 @@
 from flask import Flask, request, abort, jsonify
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import serialization
-from auth_utils import jwt_protected
-from jwt.algorithms import RSAAlgorithm
+from auth_utils import restricted, dict_from_row
 from errors import *
-from datetime import timedelta
+from datetime import timedelta, datetime
+from crypto_utils import encrypt_password, verif_password
 import sqlite3 as sql
 import jwt
 import json
-import datetime
-import base64
+import config
 
 app = Flask(__name__)
-app.config['SUPPORTED_ALGORITHMS'] = ['HS256', 'HS384', 'HS512', 'ES256', 'ES384', 'ES512', 'RS256', 'RS384',
-                                      'RS512', 'PS256', 'PS384', 'PS512']
-app.config['SUPPORTED_AUTHENTICATION'] = ['JWT-SYM', 'JWT-RSA']
-app.config['SYMMETRIC_KEY'] = 'mySupertopawfulhardcodedMEGASecretISHEre!!!'
-app.config['JWT_PUBLIC_KEY'] = open('keys/rsa.public').read()
-app.config['JWT_PRIVATE_KEY'] = open('keys/rsa.private').read()
-app.config['ROLES_LIST'] = ['REGULAR', 'AUDITOR', 'ADMIN']
+app.config.from_object('config.Config')
 
-## Return dict from row
-def dict_from_row(row):
-    return dict(zip(row.keys(), row)) 
-
-#@jwt_protected
+## Set role for a user with a specific UID
 @app.route('/user/<int:uid>/role', methods=['PUT'])
+@restricted(access_level='ADMIN')
 def setRole(uid):
     try:
-        role = request.json.get('role')
-        
-        if role not in app.config['ROLES_LIST']:
-            raise UnknownRoleError('This role is not supported.')
-
         con = sql.connect("database.db")
-        data = []
+        role = request.json.get('role')
+
+        if (role is None) or (role.upper() not in app.config['ROLES_LIST']):
+            raise UnknownRoleError()
+
         con.row_factory = sql.Row
         cur = con.cursor()
-        cur.execute("SELECT * FROM Users WHERE ID=(?)",(str(uid),))
+        cur.execute("SELECT * FROM Users WHERE ID=(?)",(uid,))
         rows = cur.fetchall()
 
         dict = []
@@ -45,10 +32,10 @@ def setRole(uid):
             dict.append(dict_from_row(row))
 
         if len(dict) < 1:
-            raise RecordsNotFoundError('No user with this UID was found!')
+            raise RecordsNotFoundError()
 
         if len(dict) > 1:
-            raise MutipleRecordsError('The user table seems to be corrupted, several users found for the same ID!')
+            raise MutipleRecordsError()
 
         cur.execute("UPDATE Users SET ROLE=(?) WHERE ID=(?)",(role, str(uid),))
         con.commit()
@@ -57,53 +44,73 @@ def setRole(uid):
 
     except sql.Error as sql_error:
         raise DatabaseQueryError(sql_error)
+    except (RecordsNotFoundError, MultipleRecordsError, UnknownRoleError) as error:
+        return {'Message':ErrorMessage[str(error.__class__.__name__)]}, 400, {'ContentType':'application/json'}
     except Exception as exception:
         raise InternalServerError(exception)
     finally:
-        con.close()
+        if con:
+            con.close()
 
+## Create user 
 @app.route('/user', methods=['POST'])
+@restricted(access_level='ADMIN')
 def register():
     try:
-        con = sql.connect("database.db")
+        con = sql.connect(app.config['DATABASE_NAME'])
         con.row_factory = sql.Row
         data = []
         cur = con.cursor()
-
+        authMethod = request.json.get('authMethod')
         username = request.json.get('username')
         password = request.json.get('password')
-        authMethod = request.json.get('authMethod')
         role = request.json.get('role')
 
         if (username is None) or (password is None) or (authMethod is None) or (role is None):
-            raise MissingParameterError('Missing required parameter!')
+            raise MissingParameterError()
 
         if (len(username) <= 2):
-            raise RecordsNotFoundError('No user with this username was found!') 
+            raise RecordsNotFoundError() 
 
-        if (len(password) <= 8):
-            raise WeakPasswordError('Password is not complex enough!')
+        if (len(password) < 8):
+            raise WeakPasswordError()
 
         if (authMethod not in app.config['SUPPORTED_AUTHENTICATION']):
-            raise InvalidAuthMethodError('This authentication method is not supported!')
+            raise InvalidAuthMethodError()
 
-        cur.execute("INSERT INTO Users (USERNAME, PASSWORD, AUTHMETHOD, ROLE, LOCKED) VALUES (?,?,?,?,?)",(username, password, authMethod, role, 0, ))
+        password = encrypt_password(password)
+                
+        cur.execute("SELECT * FROM Users WHERE USERNAME=(?)",(username,))
+        rows = cur.fetchall()
+
+        dict = []
+        for row in rows:
+            dict.append(dict_from_row(row))
+
+        if len(dict) >= 1:
+            raise UserAlreadyExistsError()
+        
+        cur.execute("INSERT INTO Users (USERNAME, PASSWORD, AUTHMETHOD, ROLE, LOCKED) VALUES (?,?,?,?,?)",(username, str(password), authMethod, role, 0, ))
         con.commit()
 
         return {'Message':'User successfuly created'}, 200, {'ContentType':'application/json'}
 
     except sql.Error as sql_error:
         raise DatabaseQueryError(sql_error)
+    except (UserAlreadyExistsError, InvalidAuthMethodError, WeakPasswordError, RecordsNotFoundError, MissingParameterError) as error:
+        return {'Message':ErrorMessage[str(error.__class__.__name__)]}, 400, {'ContentType':'application/json'}
     except Exception as exception:
         raise InternalServerError(exception)
     finally:
-        con.close()
+        if con:
+            con.close()
 
+## List all users
 @app.route('/users', methods=['GET'])
-@jwt_protected
+@restricted(access_level='AUDITOR')
 def listUsers():
     try:
-        con = sql.connect("database.db")
+        con = sql.connect(app.config['DATABASE_NAME'])
         con.row_factory = sql.Row
         data = []
         cur = con.cursor()
@@ -116,9 +123,9 @@ def listUsers():
         return json.dumps(data), 200
 
     except sql.Error as sql_error: 
-        raise DatabaseQueryError(sql_error)
+        raise DatabaseQueryError()
     except Exception as exception:
-        raise InternalServerError(exception)
+        raise InternalServerError()
 
 ## Untrusted auth is based on RS256 (asymmetric key) - Case where you do not control the endpoint receiving the token: browsers, mobile appliations...
 ## Trusted auth is based on HS256 (symmetric key) - Case where you have control of the endpoint receiving the token
@@ -126,64 +133,77 @@ def listUsers():
 def authForClients():
        
     try:
+       con = sql.connect('database.db')
        username = request.json.get('username')
        password = request.json.get('password')
        encodedJWT = ''
 
        if username is None or password is None:
-           raise InvalidCredentialsError('Invalid Credentials')  
-    
-       con = sql.connect('database.db')
+           raise InvalidCredentialsError()  
+                   
        con.row_factory = sql.Row
        cur = con.cursor()
-       cur.execute("select ID,USERNAME,AUTHMETHOD from Users where USERNAME=? and PASSWORD=?",(username,password))
+       cur.execute("select ID,USERNAME,PASSWORD,AUTHMETHOD,EMAIL,LOCKED from Users where USERNAME=?",(username,))
        rows = cur.fetchall()
-       con.close()
-
+      
        dict = []
        for row in rows:
            dict.append(dict_from_row(row))
-        
+       
        if len(dict) < 1:
-           raise InvalidCredentialsError('Invalid credentals!')
+           raise InvalidCredentialsError()
 
        if len(dict) > 1:
-           raise MutipleRecordsError('The user table seems to have several users found for the same username/password tuple!')
+           raise MutipleRecordsError()
+
+       # Check password
+       if not verif_password(password,dict[0]['PASSWORD']):
+           raise InvalidCredentialsError()
        
+       # User is locked?
+       if dict['0']['LOCKED'] == 1:
+           raise UserLockedError()
+
        payload = {
                'exp': datetime.utcnow() + timedelta(days=1),
                'iat': datetime.utcnow(),
-               'nbf': datetime.utcnow()
+               'nbf': datetime.utcnow(),
+               'user_uid': dict[0]['ID'],
+               'user_email': b64encode(dict[0]['EMAIL'])
        }
 
        if dict[0]['AUTHMETHOD'] not in app.config['SUPPORTED_AUTHENTICATION']:
-           raise InvalidAuthenticationTypeError('Invalid authentication type!')
+           raise InvalidAuthMethodError()
 
        if dict[0]['AUTHMETHOD'] == 'JWT-RSA':
            encodedJWT = jwt.encode(payload, app.config['JWT_PRIVATE_KEY'], algorithm='RS256')
        else:
-           ##JWT-SYM                 
+           ##JWT-SYM                
            encodedJWT = jwt.encode(payload, app.config['SYMMETRIC_KEY'], algorithm='HS256')
 
        return jsonify(JWT=encodedJWT.decode('utf-8')), 200 
 
     except sql.Error as sql_error:                           
         raise DatabaseQueryError(sql_error)
-    except Exception as exception: 
-        raise InternalServerError(exception)
+    except (InvalidCredentialsError, UserLockedError) as error:
+        return {'Message':ErrorMessage[str(error.__class__.__name__)]}, 403,  {'ContentType':'application/json'}
+    except (InvalidAuthMethodError,MultipleRecordsError) as error:
+        return {'Message':ErrorMessage[str(error.__class__.__name__)]}, 400, {'ContentType':'application/json'}
+    except Exception as e: 
+        raise InternalServerError(e)
     finally:
         if con:
             con.close()
 
 ##User update based on username
 @app.route('/user/<string:username>', methods=['PUT'])
-@jwt_protected
+@restricted(access_level='ADMIN')
 def updateUserByUsername(username):
 
     try:
         authmethod = request.json.get('authMethod')
 
-        con = sql.connect("database.db")
+        con = sql.connect(app.config['DATABASE_NAME'])
         data = []
         con.row_factory = sql.Row
         cur = con.cursor()
@@ -195,10 +215,10 @@ def updateUserByUsername(username):
             dict.append(dict_from_row(row))
 
         if len(dict) < 1:
-            raise RecordsNotFoundError('No user with this username was found!')
+            raise RecordsNotFoundError()
 
         if len(dict) > 1:
-            raise MutipleRecordsError('The user table seems to have several users found for the same username!')
+            raise MutipleRecordsError()
 
         #rowcount is == 1
         #checking current values for this user
@@ -212,21 +232,23 @@ def updateUserByUsername(username):
 
     except sql.Error as sql_error:
         raise DatabaseQueryError(sql_error)
+    except(RecordsNotFoundError,MultipleRecordsError) as error:
+        return {'Message':ErrorMessage[str(error.__class__.__name__)]}, 400, {'ContentType':'application/json'}
     except Exception as exception:
-        raise InternalServerError(sys.exc_info()[0])
+        raise InternalServerError(exception)
     finally:
         con.close()
 
 ##User update based on UID
 @app.route('/user/<int:uid>', methods=['PUT'])
-@jwt_protected
+@restricted(access_level='ADMIN')
 def updateUserByUID(uid):
 
     try:
         username = request.json.get('username')
         authmethod = request.json.get('authMethod')
 
-        con = sql.connect("database.db")
+        con = sql.connect(app.config['DATABASE_NAME'])
         data = []
         con.row_factory = sql.Row
         cur = con.cursor()
@@ -238,10 +260,10 @@ def updateUserByUID(uid):
             dict.append(dict_from_row(row))
     
         if len(dict) < 1:
-            raise RecordsNotFoundError('No user with this UID was found!')  
+            raise RecordsNotFoundError()  
     
         if len(dict) > 1:
-            raise MutipleRecordsError('The user table seems to be corrupted, several users found for the same ID!') 
+            raise MutipleRecordsError() 
 
         #rowcount is == 1
         #checking current values for this user
@@ -258,21 +280,22 @@ def updateUserByUID(uid):
 
     except sql.Error as sql_error:
         raise DatabaseQueryError(sql_error)
+    except (RecordsNotFoundError, MultipleRecordsError) as error:
+        return {'Message':ErrorMessage[str(error.__class__.__name__)]}, 400, {'ContentType':'application/json'}
     except Exception as exception:
-        raise InternalServerError(sys.exc_info()[0])
+        raise InternalServerError(exception)
     finally:
         if con:
             con.close()
-
     
 ##List users based on username
 @app.route('/user/<string:username>', methods=['GET'])
-@jwt_protected
+@restricted(access_level='AUDITOR')
 def listUsersByUsername(username):
 
     data = []
     try:
-        con = sql.connect("database.db")
+        con = sql.connect(app.config['DATABASE_NAME'])
         con.row_factory = sql.Row
         cur = con.cursor()
         cur.execute("SELECT * FROM Users WHERE USERNAME=(?)",(username,))
@@ -293,12 +316,12 @@ def listUsersByUsername(username):
 
 ##List users based on UID
 @app.route('/user/<int:uid>', methods=['GET'])
-@jwt_protected
+@restricted(access_level='AUDITOR')
 def listUsersByUID(uid):
     
     data = []
     try:
-        con = sql.connect("database.db")
+        con = sql.connect(app.config['DATABASE_NAME'])
         con.row_factory = sql.Row
         cur = con.cursor()
         cur.execute("SELECT * FROM Users WHERE ID=(?)",(str(uid),))
@@ -316,7 +339,6 @@ def listUsersByUID(uid):
     finally:
         if con:
             con.close()
-    
 
 if __name__ == '__main__':
     app.run()

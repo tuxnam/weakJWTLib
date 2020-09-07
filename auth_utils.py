@@ -1,18 +1,74 @@
 from functools import wraps
 from flask import request, redirect, url_for, current_app
+from errors import *
 import jwt
+import sqlite3 as sql
 
-def jwt_protected(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        authHeader = request.headers['Authorization']
-        if (authHeader is not None) or (authHeader.startswith('JWT')):
-            
-            current_app.config['JWT_KEY'] = current_app.config['SYMMETRIC_KEY']
-            decoded = jwt.decode(authHeader.split('JWT ')[1], current_app.config['JWT_KEY'], algorithms=current_app.config['SUPPORTED_ALGORITHMS'])
+def dict_from_row(row):
+    return dict(zip(row.keys(), row))
 
-            return f(*args, **kwargs)
-        else:
-            return '400'
-        return f(*args, **kwargs)
-    return decorated_function
+def restricted(access_level):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+                     
+            try:
+                con = sql.connect(current_app.config['DATABASE_NAME'])
+                authHeader = request.headers['Authorization']
+
+                if (authHeader is not None) and (authHeader.startswith('JWT')):
+                    unverified_decoded = jwt.decode(authHeader.split('JWT ')[1], verify=False)
+ 
+                con.row_factory = sql.Row
+                cur = con.cursor()
+                cur.execute("SELECT * FROM Users WHERE ID=(?)",(unverified_decoded['user_uid'],))
+                rows = cur.fetchall()
+                
+                dict = []
+                for row in rows:
+            	    dict.append(dict_from_row(row))
+
+                if len(dict) < 1:
+                    raise RecordsNotFoundError()
+
+                if len(dict) > 1: 
+                    raise MultipleRecordsError()
+
+                # Check if user has the correct authentication method used for JWT
+                if (dict[0]['AUTHMETHOD'] == 'JWT-SYM'):
+                    jwt_key = current_app.config['SYMMETRIC_KEY']
+                else:
+                    jwt_key = current_app.config['JWT_PRIVATE_KEY']
+
+                decoded = jwt.decode(authHeader.split('JWT ')[1], jwt_key, algorithms=current_app.config['SUPPORTED_ALGORITHMS'])    
+
+                # ADMIN required
+                if access_level.upper() == 'ADMIN':
+                    if ((dict[0]['ROLE']).upper()) == access_level.upper():
+                        return func(*args, **kwargs)
+                
+                # Minimum level required (auditor)
+                if access_level.upper() == 'AUDITOR':
+                    return func(*args, **kwargs)
+
+                # At least operator level required (ADMIN and OPERATOR both valids)
+                if access_level.upper() == 'OPERATOR':
+                    if (((dict[0]['ROLE']).upper()) == 'OPERATOR') or (((dict[0]['ROLE']).upper()) == 'ADMIN'):
+                        return func(*args, **kwargs)
+                    else:
+                        raise InvalidPrivilegesError() 
+
+            except sql.Error as sql_error:
+                raise DatabaseQueryError(sql_error)
+            except jwt.InvalidSignatureError as error:
+                log_error(error)
+                return {'Message':ErrorMessage[str(error.__class__.__name__)]}, 403, {'ContentType':'application/json'}
+            except (InvalidPrivilegesError, RecordsNotFoundError, MultipleRecordsError, InvalidSignatureError) as error:
+                return {'Message':ErrorMessage[str(error.__class__.__name__)]}, 403, {'ContentType':'application/json'} 
+            except Exception as exception:
+                raise InternalServerError(exception)
+            finally:
+                if con:
+                    con.close()
+        return wrapper
+    return decorator
