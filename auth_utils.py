@@ -16,9 +16,11 @@ def restricted(access_level):
                 con = sql.connect(current_app.config['DATABASE_NAME'])
                 authHeader = request.headers['Authorization']
 
-                if (authHeader is not None) and (authHeader.startswith('JWT')):
-                    unverified_decoded = jwt.decode(authHeader.split('JWT ')[1], verify=False)
- 
+                if (authHeader is not None) and (authHeader.startswith('Bearer')):
+                    unverified_decoded = jwt.decode(authHeader.split('Bearer')[1].strip(), verify=False)
+                else:
+                    raise InvalidCredentialsError()
+
                 con.row_factory = sql.Row
                 cur = con.cursor()
                 cur.execute("SELECT * FROM Users WHERE ID=(?)",(unverified_decoded['user_uid'],))
@@ -38,9 +40,9 @@ def restricted(access_level):
                 if (dict[0]['AUTHMETHOD'] == 'JWT-SYM'):
                     jwt_key = current_app.config['SYMMETRIC_KEY']
                 else:
-                    jwt_key = current_app.config['JWT_PRIVATE_KEY']
-
-                decoded = jwt.decode(authHeader.split('JWT ')[1], jwt_key, algorithms=current_app.config['SUPPORTED_ALGORITHMS'])    
+                    jwt_key = current_app.config['JWT_PUBLIC_KEY']
+                
+                decoded = jwt.decode(authHeader.split('Bearer ')[1].strip(), jwt_key, algorithms=current_app.config['SUPPORTED_ALGORITHMS'])    
 
                 # ADMIN required
                 if access_level.upper() == 'ADMIN':
@@ -61,9 +63,10 @@ def restricted(access_level):
             except sql.Error as sql_error:
                 raise DatabaseQueryError(sql_error)
             except jwt.InvalidSignatureError as error:
-                log_error(error)
+                raise InvalidSignatureError(error)
+            except InvalidSignatureError as error:
                 return {'Message':ErrorMessage[str(error.__class__.__name__)]}, 403, {'ContentType':'application/json'}
-            except (InvalidPrivilegesError, RecordsNotFoundError, MultipleRecordsError, InvalidSignatureError) as error:
+            except (InvalidPrivilegesError, RecordsNotFoundError, MultipleRecordsError, InvalidCredentialsError) as error:
                 return {'Message':ErrorMessage[str(error.__class__.__name__)]}, 403, {'ContentType':'application/json'} 
             except Exception as exception:
                 raise InternalServerError(exception)

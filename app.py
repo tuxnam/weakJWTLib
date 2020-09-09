@@ -7,6 +7,7 @@ import sqlite3 as sql
 import jwt
 import json
 import config
+import base64
 
 app = Flask(__name__)
 app.config.from_object('config.Config')
@@ -54,7 +55,7 @@ def setRole(uid):
 
 ## Create user 
 @app.route('/user', methods=['POST'])
-@restricted(access_level='ADMIN')
+##@restricted(access_level='ADMIN')
 def register():
     try:
         con = sql.connect(app.config['DATABASE_NAME'])
@@ -74,7 +75,7 @@ def register():
 
         if (len(password) < 8):
             raise WeakPasswordError()
-
+        
         if (authMethod not in app.config['SUPPORTED_AUTHENTICATION']):
             raise InvalidAuthMethodError()
 
@@ -161,15 +162,19 @@ def authForClients():
            raise InvalidCredentialsError()
        
        # User is locked?
-       if dict['0']['LOCKED'] == 1:
+       if dict[0]['LOCKED'] == 1:
            raise UserLockedError()
+    
+       # optional elements:
+       if dict[0]['EMAIL'] is None:
+           dict[0]['EMAIL'] = ''
 
        payload = {
                'exp': datetime.utcnow() + timedelta(days=1),
                'iat': datetime.utcnow(),
                'nbf': datetime.utcnow(),
                'user_uid': dict[0]['ID'],
-               'user_email': b64encode(dict[0]['EMAIL'])
+               'user_email': base64.b64encode(dict[0]['EMAIL'].encode('utf-8')).decode('utf-8')
        }
 
        if dict[0]['AUTHMETHOD'] not in app.config['SUPPORTED_AUTHENTICATION']:

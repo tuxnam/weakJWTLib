@@ -11,6 +11,14 @@ def log_error(error):
     """
     logging.error(str(datetime.now().time())+': '+str(error))
 
+class InvalidSignatureError(Exception):
+    """JWT signature is invalid
+    """
+    def __init__(self,error):
+        self.message = ErrorMessage['InvalidSignatureError']
+        log_error(error)
+        super().__init__(self.message)
+
 class UserLockedError(Exception):
     """Exception raised for locked user.
     """
