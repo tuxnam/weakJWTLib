@@ -54,3 +54,9 @@ This python application is using latest version of a JWT library, for which the 
 ## Why?
 
 Learning, playing, sharing!
+
+## How to test?
+
+### Postman
+### CURL
+### API specs
